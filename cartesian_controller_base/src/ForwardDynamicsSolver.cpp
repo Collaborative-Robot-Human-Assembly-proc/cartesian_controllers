@@ -32,7 +32,7 @@
 /*!\file    ForwardDynamicsSolver.cpp
  *
  * \author  Stefan Scherzinger <scherzin@fzi.de>
- * \date    2020/03/24
+ * \date    2016/02/14
  *
  */
 //-----------------------------------------------------------------------------
@@ -43,39 +43,14 @@
 // other
 #include <map>
 #include <sstream>
+#include <boost/algorithm/clamp.hpp>
 #include <eigen_conversions/eigen_kdl.h>
 
 // KDL
 #include <kdl/jntarrayvel.hpp>
 #include <kdl/framevel.hpp>
 
-// Pluginlib
-#include <pluginlib/class_list_macros.h>
-
-
-/**
- * \class cartesian_controller_base::ForwardDynamicsSolver 
- *
- * Users may explicitly specify it with \a "forward_dynamics" as \a ik_solver
- * in their controllers.yaml configuration file for each controller:
- *
- * \code{.yaml}
- * <name_of_your_controller>:
- *     type: "<type_of_your_controller>"
- *     ik_solver: "forward_dynamics"
- *     ...
- *
- *     solver:
- *         ...
- *         forward_dynamics:
- *             link_mass: 0.5
- * \endcode
- *
- */
-PLUGINLIB_EXPORT_CLASS(cartesian_controller_base::ForwardDynamicsSolver, cartesian_controller_base::IKSolver)
-
-
-
+// DEBUG
 
 
 namespace cartesian_controller_base{
@@ -91,8 +66,7 @@ namespace cartesian_controller_base{
         const ctrl::Vector6D& net_force)
   {
 
-    // Compute joint space inertia matrix with actualized link masses
-    buildGenericModel();
+    // Compute joint space inertia matrix
     m_jnt_space_inertia_solver->JntToMass(m_current_positions,m_jnt_space_inertia);
 
     // Compute joint jacobian
@@ -101,14 +75,18 @@ namespace cartesian_controller_base{
     // Compute joint accelerations according to: \f$ \ddot{q} = H^{-1} ( J^T f) \f$
     m_current_accelerations.data = m_jnt_space_inertia.data.inverse() * m_jnt_jacobian.data.transpose() * net_force;
 
-    // Numerical time integration with the Euler forward method
-    m_current_positions.data = m_last_positions.data + m_last_velocities.data * period.toSec();
-    m_current_velocities.data = m_last_velocities.data + m_current_accelerations.data * period.toSec();
-    m_current_velocities.data *= 0.9;  // 10 % global damping against unwanted null space motion.
-                                       // Will cause exponential slow-down without input.
+    // Integrate once, starting with zero motion
+    m_current_velocities.data = 0.5 * m_current_accelerations.data * period.toSec();
+
+    // Integrate twice, starting with zero motion
+    m_current_positions.data = m_last_positions.data + 0.5 * m_current_velocities.data * period.toSec();
 
     // Make sure positions stay in allowed margins
-    applyJointLimits();
+    for (int i = 0; i < m_number_joints; ++i)
+    {
+      m_current_positions(i) = boost::algorithm::clamp(
+          m_current_positions(i),m_lower_pos_limits(i),m_upper_pos_limits(i));
+    }
 
     // Apply results
     trajectory_msgs::JointTrajectoryPoint control_cmd;
@@ -123,26 +101,64 @@ namespace cartesian_controller_base{
     }
     control_cmd.time_from_start = period; // valid for this duration
 
-    // Update for the next cycle
-    m_last_positions = m_current_positions;
-    m_last_velocities = m_current_velocities;
-
     return control_cmd;
   }
 
 
-  bool ForwardDynamicsSolver::init(ros::NodeHandle& nh,
-                                   const KDL::Chain& chain,
-                                   const KDL::JntArray& upper_pos_limits,
-                                   const KDL::JntArray& lower_pos_limits)
+  const KDL::Frame& ForwardDynamicsSolver::getEndEffectorPose() const
   {
-    IKSolver::init(nh, chain, upper_pos_limits, lower_pos_limits);
+    return m_end_effector_pose;
+  }
 
-    if (!buildGenericModel())
+  const ctrl::Vector6D& ForwardDynamicsSolver::getEndEffectorVel() const
+  {
+    return m_end_effector_vel;
+  }
+
+  const KDL::JntArray& ForwardDynamicsSolver::getPositions() const
+  {
+    return m_current_positions;
+  }
+
+
+  bool ForwardDynamicsSolver::setStartState(
+      const std::vector<hardware_interface::JointHandle>& joint_handles)
+  {
+    // Copy into internal buffers.
+    for (int i = 0; i < joint_handles.size(); ++i)
+    {
+      m_current_positions(i)      = joint_handles[i].getPosition();
+      m_current_velocities(i)     = joint_handles[i].getVelocity();
+      m_current_accelerations(i)  = 0.0;
+      m_last_positions(i)         = m_current_positions(i);
+    }
+    return true;
+  }
+
+
+  bool ForwardDynamicsSolver::init(
+      const KDL::Chain& chain,
+      const KDL::JntArray& upper_pos_limits,
+      const KDL::JntArray& lower_pos_limits)
+  {
+    if (!buildGenericModel(chain))
     {
       ROS_ERROR("ForwardDynamicsSolver: Something went wrong in setting up the internal model.");
       return false;
     }
+
+    // Initialize
+    m_number_joints              = m_chain.getNrOfJoints();
+    m_current_positions.data     = ctrl::VectorND::Zero(m_number_joints);
+    m_current_velocities.data    = ctrl::VectorND::Zero(m_number_joints);
+    m_current_accelerations.data = ctrl::VectorND::Zero(m_number_joints);
+    m_last_positions.data        = ctrl::VectorND::Zero(m_number_joints);
+    m_upper_pos_limits           = upper_pos_limits;
+    m_lower_pos_limits           = lower_pos_limits;
+
+    // Forward kinematics
+    m_fk_pos_solver.reset(new KDL::ChainFkSolverPos_recursive(m_chain));
+    m_fk_vel_solver.reset(new KDL::ChainFkSolverVel_recursive(m_chain));
 
     // Forward dynamics
     m_jnt_jacobian_solver.reset(new KDL::ChainJntToJacSolver(m_chain));
@@ -150,29 +166,18 @@ namespace cartesian_controller_base{
     m_jnt_jacobian.resize(m_number_joints);
     m_jnt_space_inertia.resize(m_number_joints);
 
-    // Connect dynamic reconfigure and overwrite the default values with values
-    // on the parameter server. This is done automatically if parameters with
-    // the according names exist.
-    m_callback_type = std::bind(&ForwardDynamicsSolver::dynamicReconfigureCallback,
-                                this,
-                                std::placeholders::_1,
-                                std::placeholders::_2);
-
-    m_dyn_conf_server.reset(
-        new dynamic_reconfigure::Server<IKConfig>(
-          ros::NodeHandle(nh.getNamespace() + "/solver/forward_dynamics")));
-
-    m_dyn_conf_server->setCallback(m_callback_type);
-
     ROS_INFO("Forward dynamics solver initialized");
     ROS_INFO("Forward dynamics solver has control over %i joints", m_number_joints);
 
     return true;
   }
 
-  bool ForwardDynamicsSolver::buildGenericModel()
+  bool ForwardDynamicsSolver::buildGenericModel(const KDL::Chain& input_chain)
   {
+    m_chain = input_chain;
+
     // Set all masses and inertias to minimal (yet stable) values.
+    double m_min = 0.001;
     double ip_min = 0.000001;
     for (size_t i = 0; i < m_chain.segments.size(); ++i)
     {
@@ -209,11 +214,5 @@ namespace cartesian_controller_base{
 
     return true;
   }
-
-  void ForwardDynamicsSolver::dynamicReconfigureCallback(IKConfig& config, uint32_t level)
-  {
-    m_min = config.link_mass;
-  }
-
 
 } // namespace

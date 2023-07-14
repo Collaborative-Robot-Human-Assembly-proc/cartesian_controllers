@@ -44,7 +44,7 @@
 #include <cartesian_motion_controller/cartesian_motion_controller.h>
 
 // Other
-#include <algorithm>
+#include <boost/algorithm/clamp.hpp>
 
 namespace cartesian_motion_controller
 {
@@ -86,7 +86,7 @@ starting(const ros::Time& time)
 {
   // Reset simulation with real joint state
   Base::starting(time);
-  m_current_frame = Base::m_ik_solver->getEndEffectorPose();
+  m_current_frame = Base::m_forward_dynamics_solver.getEndEffectorPose();
 
   // Start where we are
   m_target_frame = m_current_frame;
@@ -98,22 +98,10 @@ stopping(const ros::Time& time)
 {
 }
 
-template <>
-void CartesianMotionController<hardware_interface::VelocityJointInterface>::
-stopping(const ros::Time& time)
-{
-    // Stop drifting by sending zero joint velocities
-    Base::computeJointControlCmds(ctrl::Vector6D::Zero(), ros::Duration(0));
-    Base::writeJointControlCmds();
-}
-
 template <class HardwareInterface>
 void CartesianMotionController<HardwareInterface>::
 update(const ros::Time& time, const ros::Duration& period)
 {
-  // Synchronize the internal model and the real robot
-  Base::m_ik_solver->synchronizeJointPositions(Base::m_joint_handles);
-
   // Forward Dynamics turns the search for the according joint motion into a
   // control process. So, we control the internal model until we meet the
   // Cartesian target motion. This internal control needs some simulation time
@@ -135,12 +123,26 @@ update(const ros::Time& time, const ros::Duration& period)
   Base::writeJointControlCmds();
 }
 
+template <>
+void CartesianMotionController<hardware_interface::VelocityJointInterface>::
+update(const ros::Time& time, const ros::Duration& period)
+{
+  // Simulate only one step forward to avoid drift.
+  ros::Duration internal_period(0.02);
+
+  ctrl::Vector6D error = computeMotionError();
+
+  Base::computeJointControlCmds(error,internal_period);
+
+  Base::writeJointControlCmds();
+}
+
 template <class HardwareInterface>
 ctrl::Vector6D CartesianMotionController<HardwareInterface>::
 computeMotionError()
 {
   // Compute motion error wrt robot_base_link
-  m_current_frame = Base::m_ik_solver->getEndEffectorPose();
+  m_current_frame = Base::m_forward_dynamics_solver.getEndEffectorPose();
 
   // Transformation from target -> current corresponds to error = target - current
   KDL::Frame error_kdl;
@@ -155,13 +157,10 @@ computeMotionError()
 
   // Clamp maximal tolerated error.
   // The remaining error will be handled in the next control cycle.
-  // Note that this is also the maximal offset that the
-  // cartesian_compliance_controller can use to build up a restoring stiffness
-  // wrench.
   const double max_angle = 1.0;
   const double max_distance = 1.0;
-  angle    = std::clamp(angle,-max_angle,max_angle);
-  distance = std::clamp(distance,-max_distance,max_distance);
+  angle    = boost::algorithm::clamp(angle,-max_angle,max_angle);
+  distance = boost::algorithm::clamp(distance,-max_distance,max_distance);
 
   // Scale errors to allowed magnitudes
   rot_axis = rot_axis * angle;

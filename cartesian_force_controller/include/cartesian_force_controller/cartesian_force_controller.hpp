@@ -41,11 +41,10 @@
 #define CARTESIAN_FORCE_CONTROLLER_HPP_INCLUDED
 
 // Project
-#include "cartesian_controller_base/Utility.h"
 #include <cartesian_force_controller/cartesian_force_controller.h>
 
 // Other
-#include <algorithm>
+#include <boost/algorithm/clamp.hpp>
 
 namespace cartesian_force_controller
 {
@@ -53,7 +52,7 @@ namespace cartesian_force_controller
 template <class HardwareInterface>
 CartesianForceController<HardwareInterface>::
 CartesianForceController()
-: Base::CartesianControllerBase(), m_hand_frame_control(true)
+: Base::CartesianControllerBase()
 {
 }
 
@@ -66,15 +65,6 @@ init(HardwareInterface* hw, ros::NodeHandle& nh)
   if (!nh.getParam("ft_sensor_ref_link",m_ft_sensor_ref_link))
   {
     ROS_ERROR_STREAM("Failed to load " << nh.getNamespace() + "/ft_sensor_ref_link" << " from parameter server");
-    return false;
-  }
-
-  // Make sure sensor link is part of the robot chain
-  if(!Base::robotChainContains(m_ft_sensor_ref_link))
-  {
-    ROS_ERROR_STREAM(m_ft_sensor_ref_link << " is not part of the kinematic chain from "
-                                           << Base::m_robot_base_link << " to "
-                                           << Base::m_end_effector_link);
     return false;
   }
 
@@ -113,17 +103,6 @@ init(HardwareInterface* hw, ros::NodeHandle& nh)
   m_target_wrench.setZero();
   m_ft_sensor_wrench.setZero();
 
-  // Connect dynamic reconfigure and overwrite the default values with values
-  // on the parameter server. This is done automatically if parameters with
-  // the according names exist.
-  m_callback_type = std::bind(
-      &CartesianForceController::dynamicReconfigureCallback, this, std::placeholders::_1, std::placeholders::_2);
-
-  m_dyn_conf_server.reset(
-      new dynamic_reconfigure::Server<Config>(nh));
-
-  m_dyn_conf_server->setCallback(m_callback_type);
-
   return true;
 }
 
@@ -140,34 +119,41 @@ stopping(const ros::Time& time)
 {
 }
 
-template <>
-void CartesianForceController<hardware_interface::VelocityJointInterface>::
-stopping(const ros::Time& time)
-{
-    // Stop drifting by sending zero joint velocities
-    Base::computeJointControlCmds(ctrl::Vector6D::Zero(), ros::Duration(0));
-    Base::writeJointControlCmds();
-}
-
 template <class HardwareInterface>
 void CartesianForceController<HardwareInterface>::
 update(const ros::Time& time, const ros::Duration& period)
 {
-  // Synchronize the internal model and the real robot
-  Base::m_ik_solver->synchronizeJointPositions(Base::m_joint_handles);
-
   // Control the robot motion in such a way that the resulting net force
-  // vanishes.  The internal 'simulation time' is deliberately independent of
-  // the outer control cycle.
-  ros::Duration internal_period(0.02);
+  // vanishes. This internal control needs some simulation time steps.
+  for (int i = 0; i < Base::m_iterations; ++i)
+  {
+    // The internal 'simulation time' is deliberately independent of the outer
+    // control cycle.
+    ros::Duration internal_period(0.02);
 
-  // Compute the net force
-  ctrl::Vector6D error = computeForceError();
+    // Compute the net force
+    ctrl::Vector6D error = computeForceError();
 
-  // Turn Cartesian error into joint motion
-  Base::computeJointControlCmds(error,internal_period);
+    // Turn Cartesian error into joint motion
+    Base::computeJointControlCmds(error,internal_period);
+  }
 
   // Write final commands to the hardware interface
+  Base::writeJointControlCmds();
+}
+
+template <>
+void CartesianForceController<hardware_interface::VelocityJointInterface>::
+update(const ros::Time& time, const ros::Duration& period)
+{
+  // Simulate only one step forward.
+  // The constant simulation time adds to solver stability.
+  ros::Duration internal_period(0.02);
+
+  ctrl::Vector6D error = computeForceError();
+
+  Base::computeJointControlCmds(error,internal_period);
+
   Base::writeJointControlCmds();
 }
 
@@ -175,19 +161,9 @@ template <class HardwareInterface>
 ctrl::Vector6D CartesianForceController<HardwareInterface>::
 computeForceError()
 {
-  ctrl::Vector6D target_wrench;
-  if (m_hand_frame_control) // Assume end-effector frame by convention
-  {
-    target_wrench = Base::displayInBaseLink(m_target_wrench,Base::m_end_effector_link);
-  }
-  else // Default to robot base frame
-  {
-    target_wrench = m_target_wrench;
-  }
-
   // Superimpose target wrench and sensor wrench in base frame
   return Base::displayInBaseLink(m_ft_sensor_wrench,m_new_ft_sensor_ref)
-    + target_wrench
+    + Base::displayInBaseLink(m_target_wrench,Base::m_end_effector_link)
     + compensateGravity();
 }
 
@@ -201,7 +177,7 @@ setFtSensorReferenceFrame(const std::string& new_ref)
 
   // Joint positions should cancel out, i.e. it doesn't matter as long as they
   // are the same for both transformations.
-  KDL::JntArray jnts(Base::m_ik_solver->getPositions());
+  KDL::JntArray jnts(Base::m_forward_dynamics_solver.getPositions());
 
   KDL::Frame sensor_ref;
   Base::m_forward_kinematics_solver->JntToCart(
@@ -293,13 +269,6 @@ signalTaringCallback(std_srvs::Trigger::Request& req, std_srvs::Trigger::Respons
   res.message = "Got it.";
   res.success = true;
   return true;
-}
-
-template <class HardwareInterface>
-void CartesianForceController<HardwareInterface>::dynamicReconfigureCallback(Config& config,
-                                                                             uint32_t level)
-{
-  m_hand_frame_control = config.hand_frame_control;
 }
 
 }

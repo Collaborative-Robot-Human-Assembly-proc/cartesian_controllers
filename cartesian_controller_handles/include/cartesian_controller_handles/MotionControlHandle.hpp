@@ -97,16 +97,12 @@ init(HardwareInterface* hw, ros::NodeHandle& nh)
   std::string robot_description;
   urdf::Model robot_model;
   KDL::Tree   robot_tree;
+  KDL::Chain  robot_chain;
 
   // Get configuration from parameter server
-  if (!ros::param::search("robot_description", robot_description))
+  if (!nh.getParam("/robot_description",robot_description))
   {
-    ROS_ERROR_STREAM("Searched enclosing namespaces for robot_description but nothing found");
-    return false;
-  }
-  if (!nh.getParam(robot_description, robot_description))
-  {
-    ROS_ERROR_STREAM("Failed to load " << robot_description << " from parameter server");
+    ROS_ERROR("Failed to load '/robot_description' from parameter server");
     return false;
   }
   if (!nh.getParam("robot_base_link",m_robot_base_link))
@@ -143,7 +139,7 @@ init(HardwareInterface* hw, ros::NodeHandle& nh)
     ROS_ERROR("Failed to parse KDL tree from urdf model");
     return false;
   }
-  if (!robot_tree.getChain(m_robot_base_link,m_end_effector_link,m_robot_chain))
+  if (!robot_tree.getChain(m_robot_base_link,m_end_effector_link,robot_chain))
   {
     ROS_ERROR_STREAM("Failed to parse robot chain from urdf model.");
     return false;
@@ -163,7 +159,7 @@ init(HardwareInterface* hw, ros::NodeHandle& nh)
   }
 
   // Initialize kinematics
-  m_fk_solver.reset(new KDL::ChainFkSolverPos_recursive(m_robot_chain));
+  m_fk_solver.reset(new KDL::ChainFkSolverPos_recursive(robot_chain));
   m_current_pose = getEndEffectorPose();
 
   // Configure the interactive marker for usage in RViz
@@ -184,13 +180,13 @@ init(HardwareInterface* hw, ros::NodeHandle& nh)
   // Add callback for motion in RViz
   m_server->setCallback(
       m_marker.name,
-      std::bind(&MotionControlHandle::updateMotionControlCallback,this,std::placeholders::_1),
+      boost::bind(&MotionControlHandle::updateMotionControlCallback,this,_1),
       visualization_msgs::InteractiveMarkerFeedback::POSE_UPDATE);
 
   // Add callback for menu interaction in RViz
   m_server->setCallback(
       m_marker.name,
-      std::bind(&MotionControlHandle::updateMarkerMenuCallback,this,std::placeholders::_1),
+      boost::bind(&MotionControlHandle::updateMarkerMenuCallback,this,_1),
       visualization_msgs::InteractiveMarkerFeedback::MENU_SELECT);
 
   // Activate configuration
@@ -262,7 +258,7 @@ void MotionControlHandle<HardwareInterface>::
 addAxisControl(
     visualization_msgs::InteractiveMarker& marker, double x, double y, double z)
 {
-  if (x == 0 && y == 0 && z == 0)
+  if (x == y == z == 0)
   {
     return;
   }

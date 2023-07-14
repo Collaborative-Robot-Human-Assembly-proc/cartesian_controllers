@@ -44,9 +44,6 @@
 #include <ros/node_handle.h>
 #include <trajectory_msgs/JointTrajectoryPoint.h>
 #include <geometry_msgs/WrenchStamped.h>
-#include <geometry_msgs/PoseStamped.h>
-#include <geometry_msgs/TwistStamped.h>
-#include <realtime_tools/realtime_publisher.h>
 
 // ros_controls
 #include <controller_interface/controller.h>
@@ -56,16 +53,13 @@
 #include <kdl/treefksolverpos_recursive.hpp>
 
 // Project
-#include <cartesian_controller_base/IKSolver.h>
+#include <cartesian_controller_base/ForwardDynamicsSolver.h>
 #include <cartesian_controller_base/SpatialPDController.h>
 #include <cartesian_controller_base/Utility.h>
 
 // Dynamic reconfigure
 #include <dynamic_reconfigure/server.h>
 #include <cartesian_controller_base/CartesianControllerConfig.h>
-
-// Pluginlib
-#include <pluginlib/class_loader.h>
 
 // Other
 #include <vector>
@@ -95,6 +89,11 @@ class CartesianControllerBase : public controller_interface::Controller<Hardware
     virtual bool init(HardwareInterface* hw, ros::NodeHandle& nh);
 
     virtual void starting(const ros::Time& time);
+
+    void pause(const ros::Time& time);
+
+    bool resume(const ros::Time& time);
+
 
   protected:
     /**
@@ -147,59 +146,17 @@ class CartesianControllerBase : public controller_interface::Controller<Hardware
      */
     ctrl::Vector6D displayInTipLink(const ctrl::Vector6D& vector, const std::string& to);
 
-    /**
-     * @brief Check if specified links are part of the robot chain
-     *
-     * @param s Link to check for existence
-     *
-     * @return True if existent, false otherwise
-     */
-    bool robotChainContains(const std::string& s)
-    {
-      for (const auto& segment : this->m_robot_chain.segments)
-      {
-        if (segment.getName() == s)
-        {
-          return true;
-        }
-      }
-      return false;
-    }
+    boost::shared_ptr<KDL::TreeFkSolverPos_recursive>
+                            m_forward_kinematics_solver;
+    ForwardDynamicsSolver   m_forward_dynamics_solver;
+    std::string             m_end_effector_link;
+    std::string             m_robot_base_link;
 
-    KDL::Chain m_robot_chain;
-
-    std::shared_ptr<KDL::TreeFkSolverPos_recursive> m_forward_kinematics_solver;
-
-    /**
-     * @brief Allow users to choose the IK solver type on startup
-     */
-    std::shared_ptr<pluginlib::ClassLoader<IKSolver> > m_solver_loader;
-    std::shared_ptr<IKSolver> m_ik_solver;
-
-    std::string m_end_effector_link;
-    std::string m_robot_base_link;
-
+    bool m_paused;
     int m_iterations;
-    std::vector<hardware_interface::JointHandle>      m_joint_handles;
-
-    /**
-     * Whether or not to publish the controller's current end-effector pose and
-     * twist.
-     */
-    std::atomic<bool> m_publish_state_feedback = false;
-
-    /**
-     * @brief Publish the controller's end-effector pose and twist
-     *
-     * The data are w.r.t. the specified robot base link.
-     * If this function is called after `computeJointControlCmds()` has
-     * been called, then the controller's internal state represents the state
-     * right after the error computation, and corresponds to the new target
-     * state that will be send to the actuators in this control cycle.
-     */
-    void publishStateFeedback();
 
   private:
+    std::vector<hardware_interface::JointHandle>      m_joint_handles;
     std::vector<std::string>                          m_joint_names;
     trajectory_msgs::JointTrajectoryPoint             m_simulated_joint_motion;
     SpatialPDController                              m_spatial_controller;
@@ -207,21 +164,15 @@ class CartesianControllerBase : public controller_interface::Controller<Hardware
     double m_error_scale;
 
     // Against multi initialization in multi inheritance scenarios
-    bool m_already_initialized;
+    bool m_already_initialized;;
 
     // Dynamic reconfigure
     typedef cartesian_controller_base::CartesianControllerConfig ControllerConfig;
 
     void dynamicReconfigureCallback(ControllerConfig& config, uint32_t level);
 
-    std::shared_ptr<dynamic_reconfigure::Server<ControllerConfig> > m_dyn_conf_server;
+    boost::shared_ptr<dynamic_reconfigure::Server<ControllerConfig> > m_dyn_conf_server;
     dynamic_reconfigure::Server<ControllerConfig>::CallbackType m_callback_type;
-
-    realtime_tools::RealtimePublisherSharedPtr<geometry_msgs::PoseStamped>
-      m_feedback_pose_publisher;
-    realtime_tools::RealtimePublisherSharedPtr<geometry_msgs::TwistStamped>
-      m_feedback_twist_publisher;
-
 };
 
 }

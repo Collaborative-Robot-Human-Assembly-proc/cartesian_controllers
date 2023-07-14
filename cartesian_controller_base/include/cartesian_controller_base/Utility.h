@@ -60,8 +60,6 @@
 
     typedef Eigen::Matrix<double,6,6> Matrix6D;
 
-    typedef Eigen::Matrix<double,Eigen::Dynamic,Eigen::Dynamic> MatrixND;
-
   }
 
 #endif

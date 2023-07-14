@@ -100,14 +100,13 @@ class JointToCartesianController
 
     JointControllerAdapter     m_controller_adapter;
 
-    KDL::Chain m_robot_chain;
     std::vector<
       hardware_interface::JointStateHandle>   m_joint_handles;
 
-    std::shared_ptr<
+    boost::shared_ptr<
       KDL::ChainFkSolverPos_recursive>        m_fk_solver;
 
-    std::shared_ptr<
+    boost::shared_ptr<
       controller_manager::ControllerManager>  m_controller_manager;
 
 };

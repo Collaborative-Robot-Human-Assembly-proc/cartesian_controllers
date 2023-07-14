@@ -11,7 +11,8 @@
 
   <!-- One license tag required, multiple allowed, one license per tag -->
   <!-- Commonly used license strings: -->
-  <license>BSD-3-Clause</license>
+  <!--   BSD, MIT, Boost Software License, GPLv2, GPLv3, LGPLv2.1, LGPLv3 -->
+  <license>BSD</license>
 
 
   <!-- Url tags are optional, but multiple are allowed, one per tag -->
@@ -41,12 +42,10 @@
 
   <build_depend>roscpp</build_depend>
   <build_depend>cartesian_controller_base</build_depend>
-  <build_depend>dynamic_reconfigure</build_depend>
 
   <run_depend>roscpp</run_depend>
   <run_depend>cartesian_controller_base</run_depend>
   <run_depend>controller_interface</run_depend>
-  <run_depend>dynamic_reconfigure</run_depend>
 
   <!-- The export tag contains other, unspecified, tags -->
   <export>
